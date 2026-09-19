@@ -12,9 +12,11 @@ ponytail: loader+splitter+embedder+vectorstore+rag를 파일 1개로 통합.
 - 프롬프트: few-shot 예시 5개 추가 (3B 모델의 숫자 처리 한계 우회)
 - 프롬프트: 규칙 7 추가 (영어 답변 금지)
 - 프롬프트: 예시 6번 추가 (문서 외 질문 대응)
-- 후처리: 영어 거부 표현을 한국어로 강제 변환 (None of the above → 문서에서 찾을 수 없습니다)
+- 후처리: 영어 거부 표현을 한국어로 강제 변환
+- 문서 관리: rebuild_index(), delete_document() 함수 추가
 """
 
+import shutil
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -102,11 +104,9 @@ def load_vectorstore(persist_dir: str = CHROMA_DIR):
 def postprocess(text: str) -> str:
     """영어 거부 표현을 한국어로 강제 변환."""
     lowered = text.lower().strip()
-    # 짧은 영어 답변이면 fallback
     for phrase in FALLBACK_PHRASES:
         if phrase in lowered:
             return FALLBACK_ANSWER
-    # 전체가 영어 알파벳만으로 이루어졌으면 fallback
     if text.strip() and all(c.isascii() and not c.isdigit() for c in text.strip()):
         return FALLBACK_ANSWER
     return text
@@ -200,7 +200,47 @@ def init_rag(rebuild: bool = False):
     return build_rag_chain(vs)
 
 
-# ===== 7. CLI 테스트 =====
+# ===== 7. 문서 관리 (신규) =====
+def rebuild_index():
+    """ChromaDB를 삭제하고 전체 재구축. 재인덱싱 함수."""
+    print("[재인덱싱] 시작")
+    if Path(CHROMA_DIR).exists():
+        shutil.rmtree(CHROMA_DIR)
+        print(f"[재인덱싱] 기존 {CHROMA_DIR} 삭제")
+    docs = load_pdfs()
+    chunks = split_docs(docs)
+    vs = build_vectorstore(chunks)
+    print("[재인덱싱] 완료")
+    return build_rag_chain(vs)
+
+
+def delete_document(filename: str):
+    """data/ 폴더에서 특정 PDF 파일 삭제. 실제 재인덱싱은 별도."""
+    pdf_path = Path(DATA_DIR) / filename
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"{filename} 파일이 없습니다")
+    if pdf_path.suffix.lower() != ".pdf":
+        raise ValueError("PDF 파일만 삭제 가능합니다")
+    pdf_path.unlink()
+    print(f"[삭제] {filename}")
+    return True
+
+
+def list_documents():
+    """data/ 폴더의 PDF 목록 반환."""
+    data_path = Path(DATA_DIR)
+    if not data_path.exists():
+        return []
+    pdfs = []
+    for pdf in sorted(data_path.glob("*.pdf")):
+        pdfs.append({
+            "name": pdf.name,
+            "size_mb": round(pdf.stat().st_size / (1024 * 1024), 2),
+        })
+    return pdfs
+
+
+# ===== 8. CLI 테스트 =====
 if __name__ == "__main__":
     import sys
 

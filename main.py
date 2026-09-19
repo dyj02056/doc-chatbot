@@ -6,17 +6,19 @@ ponytail: rag.py를 그대로 감싸는 최소 API. /ask와 /health만.
 변경 이력:
 - 최초 작성: /ask, /health 두 엔드포인트
 - 로깅 추가: logs/app.log에 질문/답변/에러 기록
+- 문서 관리: /upload, /documents, /reindex, DELETE /documents/{filename} 추가
+- 재인덱싱 상태 관리: _state["reindexing"] 플래그
 """
 
 import logging
+import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
-from rag import init_rag
+from rag import init_rag, rebuild_index, delete_document, list_documents, DATA_DIR
 
 # ===== 로깅 설정 =====
 LOG_DIR = Path("logs")
@@ -25,7 +27,6 @@ LOG_DIR.mkdir(exist_ok=True)
 logger = logging.getLogger("doc_chatbot")
 logger.setLevel(logging.INFO)
 
-# 파일 핸들러 (최대 5MB, 3개 백업)
 file_handler = RotatingFileHandler(
     LOG_DIR / "app.log",
     maxBytes=5 * 1024 * 1024,
@@ -38,14 +39,13 @@ file_handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(file_handler)
 
-# 콘솔 핸들러
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 logger.addHandler(console_handler)
 
 
 # ===== 전역 상태 =====
-_state = {"chain": None, "retriever": None}
+_state = {"chain": None, "retriever": None, "reindexing": False}
 
 
 @asynccontextmanager
@@ -73,17 +73,29 @@ class Answer(BaseModel):
     sources: list[str]
 
 
+class Document(BaseModel):
+    name: str
+    size_mb: float
+
+
 # ===== 엔드포인트 =====
 @app.get("/health")
 def health():
     """서버 상태 확인."""
     ready = _state["chain"] is not None
-    return {"status": "ok" if ready else "loading", "ready": ready}
+    return {
+        "status": "ok" if ready else "loading",
+        "ready": ready,
+        "reindexing": _state["reindexing"],
+    }
 
 
 @app.post("/ask", response_model=Answer)
 def ask(q: Query):
     """질문을 받아 문서 기반 답변과 출처를 반환."""
+    if _state["reindexing"]:
+        raise HTTPException(status_code=503, detail="재인덱싱 중입니다. 잠시 후 다시 시도하세요")
+
     if _state["chain"] is None:
         logger.warning("RAG 체인 미준비 상태에서 요청 들어옴")
         raise HTTPException(status_code=503, detail="RAG 체인 로드 중입니다")
@@ -97,9 +109,7 @@ def ask(q: Query):
     try:
         answer = _state["chain"].invoke(q.question)
         docs = _state["retriever"].invoke(q.question)
-
-        from pathlib import Path as P
-        sources = sorted({P(d.metadata.get("source", "")).name for d in docs})
+        sources = sorted({Path(d.metadata.get("source", "")).name for d in docs})
 
         logger.info(f"답변: {answer}")
         logger.info(f"출처: {', '.join(sources)}")
@@ -109,3 +119,61 @@ def ask(q: Query):
     except Exception as e:
         logger.error(f"답변 생성 실패: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"답변 생성 실패: {e}")
+
+
+# ===== 문서 관리 =====
+@app.get("/documents", response_model=list[Document])
+def get_documents():
+    """등록된 PDF 목록 반환."""
+    return list_documents()
+
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """PDF 업로드. data/에 저장만 하고 재인덱싱은 별도."""
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다")
+
+    dest = Path(DATA_DIR) / file.filename
+    dest.parent.mkdir(exist_ok=True)
+
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    logger.info(f"업로드: {file.filename}")
+    return {"status": "ok", "filename": file.filename, "message": "재인덱싱이 필요합니다"}
+
+
+@app.delete("/documents/{filename}")
+def delete_document_endpoint(filename: str):
+    """PDF 파일 삭제. 재인덱싱은 별도."""
+    try:
+        delete_document(filename)
+        logger.info(f"삭제: {filename}")
+        return {"status": "ok", "filename": filename, "message": "재인덱싱이 필요합니다"}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/reindex")
+def reindex():
+    """전체 재인덱싱. 오래 걸림 (5~15분)."""
+    if _state["reindexing"]:
+        raise HTTPException(status_code=409, detail="이미 재인덱싱 중입니다")
+
+    _state["reindexing"] = True
+    logger.info("재인덱싱 시작")
+
+    try:
+        chain, retriever = rebuild_index()
+        _state["chain"] = chain
+        _state["retriever"] = retriever
+        logger.info("재인덱싱 완료")
+        return {"status": "ok", "message": "재인덱싱 완료"}
+    except Exception as e:
+        logger.error(f"재인덱싱 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"재인덱싱 실패: {e}")
+    finally:
+        _state["reindexing"] = False
