@@ -1,15 +1,23 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-python-multipart>=0.0.9
-streamlit>=1.32.0
-langchain>=0.2.0
-langchain-community>=0.2.0
-langchain-openai>=0.1.0
-langchain-text-splitters>=0.2.0
-langchain-chroma>=0.1.0
-chromadb>=0.5.0
-pypdf>=4.0.0
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
+﻿# ===== 백엔드 =====
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32
 
+# ===== 프론트엔드 =====
+streamlit==1.64.0
+
+# ===== RAG =====
+langchain==1.4.2
+langchain-community==0.4.2
+langchain-ollama==1.1.0
+langchain-text-splitters==1.1.2
+langchain-chroma==1.1.0
+
+# ===== 벡터 DB =====
+chromadb==1.5.9
+
+# ===== 문서 로딩 =====
+pypdf==6.19.0
+
+# ===== HTTP =====
+requests==2.34.2

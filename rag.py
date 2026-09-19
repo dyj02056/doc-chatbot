@@ -9,7 +9,10 @@ ponytail: loader+splitter+embedder+vectorstore+rag를 파일 1개로 통합.
 - retriever_k: 4 → 3 (노이즈 감소)
 - 프롬프트: 규칙 번호 매김으로 3B 모델 지시 따르기 강화
 - 프롬프트: 규칙 5, 6 추가 (숫자 원문 인용 강제, 근거 문장 인용)
-- 프롬프트: few-shot 예시 3개 추가 (3B 모델의 숫자 처리 한계 우회)
+- 프롬프트: few-shot 예시 5개 추가 (3B 모델의 숫자 처리 한계 우회)
+- 프롬프트: 규칙 7 추가 (영어 답변 금지)
+- 프롬프트: 예시 6번 추가 (문서 외 질문 대응)
+- 후처리: 영어 거부 표현을 한국어로 강제 변환 (None of the above → 문서에서 찾을 수 없습니다)
 """
 
 from pathlib import Path
@@ -19,7 +22,7 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
 # ===== 설정 =====
 DATA_DIR = "data"
@@ -30,6 +33,21 @@ EMBED_MODEL = "bge-m3"
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 80
 RETRIEVER_K = 3
+
+# 영어 거부 표현 → 한국어로 변환
+FALLBACK_PHRASES = [
+    "none of the above",
+    "i don't know",
+    "not found",
+    "no information",
+    "cannot find",
+    "no relevant",
+    "not mentioned",
+    "not provided",
+    "not available",
+    "no answer",
+]
+FALLBACK_ANSWER = "문서에서 찾을 수 없습니다"
 
 
 # ===== 1. PDF 로딩 =====
@@ -80,7 +98,21 @@ def load_vectorstore(persist_dir: str = CHROMA_DIR):
     )
 
 
-# ===== 4. RAG 체인 =====
+# ===== 4. 후처리 =====
+def postprocess(text: str) -> str:
+    """영어 거부 표현을 한국어로 강제 변환."""
+    lowered = text.lower().strip()
+    # 짧은 영어 답변이면 fallback
+    for phrase in FALLBACK_PHRASES:
+        if phrase in lowered:
+            return FALLBACK_ANSWER
+    # 전체가 영어 알파벳만으로 이루어졌으면 fallback
+    if text.strip() and all(c.isascii() and not c.isdigit() for c in text.strip()):
+        return FALLBACK_ANSWER
+    return text
+
+
+# ===== 5. RAG 체인 =====
 PROMPT = ChatPromptTemplate.from_template("""
 당신은 회사 문서를 기반으로 답변하는 어시스턴트입니다.
 
@@ -88,8 +120,10 @@ PROMPT = ChatPromptTemplate.from_template("""
 1. 아래 '문서 내용'에 있는 정보만 사용하세요.
 2. 문서에 없는 내용은 절대 지어내지 마세요.
 3. 답을 모르면 정확히 "문서에서 찾을 수 없습니다"라고만 답하세요.
-4. 한국어로 간결하게 답하세요.
+4. 반드시 한국어로만 답하세요. 영어로 답하지 마세요.
 5. 숫자는 문서에 적힌 그대로 인용하세요. 절대 계산하거나 바꾸지 마세요.
+6. 답변 시 근거가 된 문장을 그대로 인용하세요.
+7. "None of the above", "I don't know", "Not found" 같은 영어 표현을 쓰지 마세요.
 
 아래 예시처럼 답하세요.
 
@@ -118,6 +152,11 @@ PROMPT = ChatPromptTemplate.from_template("""
 질문: 작년 매출은 얼마인가요?
 답변: 문서에서 찾을 수 없습니다.
 
+[예시 6]
+문서 내용: (관련 내용 없음)
+질문: 오늘 날씨는 어떤가요?
+답변: 문서에서 찾을 수 없습니다.
+
 이제 실제 질문에 답하세요.
 
 [문서 내용]
@@ -143,11 +182,12 @@ def build_rag_chain(vectorstore):
         | PROMPT
         | llm
         | StrOutputParser()
+        | RunnableLambda(postprocess)
     )
     return chain, retriever
 
 
-# ===== 5. 초기 구축 or 재사용 =====
+# ===== 6. 초기 구축 or 재사용 =====
 def init_rag(rebuild: bool = False):
     """rebuild=True면 PDF 다시 읽어서 인덱싱, False면 기존 DB 재사용."""
     if rebuild or not Path(CHROMA_DIR).exists():
@@ -160,7 +200,7 @@ def init_rag(rebuild: bool = False):
     return build_rag_chain(vs)
 
 
-# ===== 6. CLI 테스트 =====
+# ===== 7. CLI 테스트 =====
 if __name__ == "__main__":
     import sys
 
