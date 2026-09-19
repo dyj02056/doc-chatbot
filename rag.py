@@ -7,16 +7,15 @@ ponytail: loader+splitter+embedder+vectorstore+rag를 파일 1개로 통합.
 - 임베딩 모델: nomic-embed-text → bge-m3 (한국어 검색 성능 향상)
 - 청크 크기: 800 → 400 (한국어 문단 단위 검색 정확도 향상)
 - retriever_k: 4 → 3 (노이즈 감소)
-- 프롬프트: 규칙 번호 매김으로 3B 모델 지시 따르기 강화
-- 프롬프트: 규칙 5, 6 추가 (숫자 원문 인용 강제, 근거 문장 인용)
-- 프롬프트: few-shot 예시 5개 추가 (3B 모델의 숫자 처리 한계 우회)
-- 프롬프트: 규칙 7 추가 (영어 답변 금지)
-- 프롬프트: 예시 6번 추가 (문서 외 질문 대응)
+- 프롬프트: 규칙 + few-shot 예시 6개 (3B 모델 정확도 향상)
 - 후처리: 영어 거부 표현을 한국어로 강제 변환
-- 문서 관리: rebuild_index(), delete_document() 함수 추가
+- 문서 관리: rebuild_index(), delete_document(), list_documents() 추가
+- Windows 파일 잠금 대응: 폴더 이름 변경 방식으로 재인덱싱 (대안 A)
 """
 
+import gc
 import shutil
+import time
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -36,7 +35,6 @@ CHUNK_SIZE = 400
 CHUNK_OVERLAP = 80
 RETRIEVER_K = 3
 
-# 영어 거부 표현 → 한국어로 변환
 FALLBACK_PHRASES = [
     "none of the above",
     "i don't know",
@@ -200,17 +198,50 @@ def init_rag(rebuild: bool = False):
     return build_rag_chain(vs)
 
 
-# ===== 7. 문서 관리 (신규) =====
+# ===== 7. 문서 관리 =====
 def rebuild_index():
-    """ChromaDB를 삭제하고 전체 재구축. 재인덱싱 함수."""
+    """
+    ChromaDB 재구축.
+    Windows 파일 잠금 대응: 폴더 삭제 대신 '이름 변경' 사용 (대안 A).
+    """
     print("[재인덱싱] 시작")
+
+    # 1. 가비지 컬렉션 (기존 참조 해제 유도)
+    gc.collect()
+    time.sleep(0.3)
+
+    # 2. 기존 폴더를 이름 변경 (삭제 아님)
+    backup_name = None
     if Path(CHROMA_DIR).exists():
-        shutil.rmtree(CHROMA_DIR)
-        print(f"[재인덱싱] 기존 {CHROMA_DIR} 삭제")
+        backup_name = f"{CHROMA_DIR}_old_{int(time.time())}"
+        try:
+            Path(CHROMA_DIR).rename(backup_name)
+            print(f"[재인덱싱] 기존 폴더 이름 변경: {CHROMA_DIR} → {backup_name}")
+        except PermissionError as e:
+            # 이름 변경조차 실패하면 대안 C 안내
+            raise RuntimeError(
+                "chroma_db 폴더가 잠겨 있습니다. "
+                "터미널에서 다음을 실행하세요:\n"
+                "  1) uvicorn 종료 (Ctrl+C)\n"
+                "  2) Remove-Item -Recurse -Force chroma_db\n"
+                "  3) python rag.py --rebuild\n"
+                "  4) uvicorn 재시작"
+            ) from e
+
+    # 3. 새 폴더로 재구축
     docs = load_pdfs()
     chunks = split_docs(docs)
     vs = build_vectorstore(chunks)
     print("[재인덱싱] 완료")
+
+    # 4. 이전 폴더 정리 (실패해도 무시)
+    if backup_name:
+        try:
+            shutil.rmtree(backup_name, ignore_errors=True)
+            print(f"[재인덱싱] 이전 폴더 삭제: {backup_name}")
+        except Exception:
+            print(f"[재인덱싱] 이전 폴더 삭제 실패 (무시): {backup_name}")
+
     return build_rag_chain(vs)
 
 

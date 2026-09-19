@@ -1,6 +1,6 @@
 """
 streamlit_app.py — 회사 문서 AI 챗봇의 Streamlit 프론트엔드
-ponytail: 채팅 + 출처 + 서버 상태 + 문서 관리. 그 이상은 필요해지면 추가.
+ponytail: 채팅 + 출처 + 서버 상태 + 문서 관리.
 
 변경 이력:
 - 최초 작성: 채팅 UI, 출처 표시, 대화 기록 유지
@@ -9,6 +9,7 @@ ponytail: 채팅 + 출처 + 서버 상태 + 문서 관리. 그 이상은 필요�
 - 사이드바 강화: 서버 상태, 문서 목록, 앱 정보 추가
 - 문서 관리: 업로드, 삭제, 재인덱싱 UI 추가
 - 문서 목록 가독성 개선: 한 줄 표시 + 컬럼 비율 조정
+- 재인덱싱 실패 시 reindex.bat 안내 (대안 C)
 """
 
 import streamlit as st
@@ -16,7 +17,7 @@ import requests
 
 # ===== 설정 =====
 API_URL = "http://localhost:8000"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.1"
 
 st.set_page_config(
     page_title="회사 문서 AI 챗봇",
@@ -33,7 +34,6 @@ st.markdown("""
     html, body, [class*="css"] {
         font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
     }
-    /* 사이드바 문서 목록 컴팩트 */
     [data-testid="stSidebar"] .stButton button {
         padding: 0.15rem 0.4rem;
         font-size: 0.85rem;
@@ -152,7 +152,7 @@ with st.sidebar:
 
     st.markdown("**등록된 문서:**")
 
-    # 문서 목록 (한 줄 표시)
+    # 문서 목록
     try:
         docs = requests.get(f"{API_URL}/documents", timeout=5).json()
         if docs:
@@ -185,6 +185,7 @@ with st.sidebar:
     # --- 재인덱싱 ---
     st.subheader("🔄 재인덱싱")
     st.caption("문서 변경 후 실행 (5~15분)")
+
     if st.button(
         "재인덱싱 시작",
         use_container_width=True,
@@ -194,11 +195,34 @@ with st.sidebar:
         try:
             with st.spinner("재인덱싱 중... (브라우저 닫지 마세요)"):
                 res = requests.post(f"{API_URL}/reindex", timeout=1800)
+
                 if res.status_code == 200:
                     st.success("✅ 재인덱싱 완료")
                     st.rerun()
+                elif res.status_code == 409:
+                    # 대안 C: 파일 잠금으로 실패 → reindex.bat 안내
+                    st.error("❌ 재인덱싱 실패 (파일 잠금)")
+                    st.warning(
+                        "**터미널에서 다음을 실행하세요:**\n\n"
+                        "```\n"
+                        "reindex.bat 더블클릭\n"
+                        "```\n\n"
+                        "또는 터미널에서:\n"
+                        "```powershell\n"
+                        ".\\reindex.bat\n"
+                        "```\n\n"
+                        "**reindex.bat이 하는 일:**\n"
+                        "1. uvicorn 자동 종료\n"
+                        "2. chroma_db 삭제\n"
+                        "3. 재인덱싱 (5~15분)\n"
+                        "4. uvicorn 자동 재시작\n\n"
+                        "완료 후 브라우저를 새로고침하세요."
+                    )
+                    with st.expander("상세 오류"):
+                        st.code(res.json().get("detail", ""))
                 else:
                     st.error(res.json().get("detail", "재인덱싱 실패"))
+
         except requests.exceptions.Timeout:
             st.error("재인덱싱 시간 초과 (30분)")
         except Exception as e:
